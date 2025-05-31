@@ -1,250 +1,7 @@
-import tkinter
-import tkinter.filedialog
-import tkinter.messagebox
-import customtkinter
-import subprocess
-import os
-import glob
-import json
-import datetime
-import sys
-import platform
-import threading
-import time
-import tempfile
-import uuid
-from PIL import Image
-from dateutil import parser as date_parser
+from . import config_settings
+from . import utils
+from .ui_dialogs import CustomFilenameDialog
 
-# --- Configuration & Global Variables ---
-VIDEO_EXTENSIONS = ('*.mp4', '*.mov', '*.avi', '*.mkv', '*.wmv', '*.flv')
-RECENT_FILES_COUNT = 5
-THUMBNAIL_WIDTH = 320
-THUMBNAIL_HEIGHT = 180
-THUMBNAIL_UPDATE_DELAY_MS = 300
-TRIM_SUFFIX = "_trimmy"
-SCRUB_INCREMENT = 0.5
-temp_files_to_cleanup = []
-BROWSE_OPTION = "Browse..."
-STATUS_MESSAGE_CLEAR_DELAY_MS = 5000
-FILENAME_INVALID_CHARS = r'/\:*?"<>|'
-CONFIG_FILENAME = "config.json"
-INITIAL_LOCATION_PROMPT = "Click to Select Video Directory..."
-
-def format_time(seconds):
-    if seconds is None or not isinstance(seconds, (int, float)) or seconds < 0:
-        return "00:00:00"
-    try:
-        if seconds == float('inf') or seconds != seconds: # handles NaN
-            return "00:00:00"
-        delta = datetime.timedelta(seconds=seconds)
-        total_seconds = int(delta.total_seconds())
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        return f"{hours:02}:{minutes:02}:{seconds_part:02}"
-    except Exception as e:
-        print(f"Warning: Error formatting time {seconds}: {e}")
-        return "00:00:00"
-
-def format_size(size_bytes):
-    if size_bytes is None or not isinstance(size_bytes, (int, float)) or size_bytes < 0: return "N/A"
-    if size_bytes == 0: return "0 B"
-    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-    i = 0
-    while size_bytes >= 1024 and i < len(size_name)-1 and (isinstance(size_bytes, (int, float)) and size_bytes == size_bytes):
-        size_bytes /= 1024.0
-        i += 1
-    p = 2 if i > 0 else 0
-    return f"{size_bytes:.{p}f} {size_name[i]}"
-
-def get_parent_directories(path):
-    path = os.path.normpath(os.path.abspath(path))
-    parents = []
-    if not os.path.isdir(path): path = os.path.dirname(path)
-    if path and os.path.isdir(path): parents.append(path)
-    while True:
-        parent = os.path.dirname(path)
-        if parent == path or not parent: break
-        if os.path.isdir(parent): parents.append(parent)
-        else: break
-        path = parent
-    return parents
-
-def load_last_directory():
-    config_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), CONFIG_FILENAME)
-    try:
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                last_dir = config.get("last_input_directory")
-                if last_dir and os.path.isdir(last_dir):
-                    print(f"Loaded last directory from config: {last_dir}")
-                    return last_dir
-                else: print("Config found, but last directory is invalid or missing.")
-    except (json.JSONDecodeError, IOError, Exception) as e: print(f"Error loading config file ({config_path}): {e}")
-    print("No valid last directory found in config or config does not exist.")
-    return None
-
-def get_video_metadata(file_path):
-    if not file_path or not os.path.exists(file_path): print(f"Error: File not found - {file_path}"); return None, None, None, None
-    try:
-        startupinfo = None
-        if platform.system() == 'Windows': startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startupinfo.wShowWindow = subprocess.SW_HIDE
-        subprocess.run(['ffprobe', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-    except (FileNotFoundError, subprocess.CalledProcessError): print("Error: ffprobe not found."); tkinter.messagebox.showerror("Error", "ffprobe (part of FFmpeg) not found in system PATH.\nPlease install FFmpeg and ensure it's added to PATH."); return None, None, None, None
-    command = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', file_path]
-    try:
-        startupinfo = None
-        if platform.system() == 'Windows': startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startupinfo.wShowWindow = subprocess.SW_HIDE
-        process = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', startupinfo=startupinfo)
-        metadata = json.loads(process.stdout)
-        duration = 0.0; creation_time_str_formatted = "N/A"; file_size_str = "N/A"; file_size_bytes = None; creation_time_tag = None
-        if 'format' in metadata:
-            if 'duration' in metadata['format']:
-                try: duration = float(metadata['format']['duration'])
-                except (ValueError, TypeError): duration = 0.0
-            if 'tags' in metadata['format'] and 'creation_time' in metadata['format']['tags']:
-                 creation_time_tag = metadata['format']['tags']['creation_time']
-                 try:
-                     dt_object = date_parser.isoparse(creation_time_tag)
-                     dt_object = dt_object.astimezone(None) if dt_object.tzinfo else dt_object
-                     creation_time_str_formatted = dt_object.strftime('%m/%d/%y %H:%M')
-                 except ValueError as e: print(f"Warning: Could not parse tag '{creation_time_tag}': {e}."); creation_time_tag = None
-            if 'size' in metadata['format']:
-                try: file_size_bytes = int(metadata['format']['size'])
-                except (ValueError, TypeError): pass
-        if creation_time_tag is None:
-             try:
-                 mtime = os.path.getmtime(file_path)
-                 dt_object = datetime.datetime.fromtimestamp(mtime)
-                 creation_time_str_formatted = dt_object.strftime('%m/%d/%y %H:%M')
-             except Exception as e: print(f"Warning: Could not get file mod time: {e}"); creation_time_str_formatted = "N/A"
-        if file_size_bytes is None:
-            try: file_size_bytes = os.path.getsize(file_path)
-            except OSError as e: print(f"Warning: Could not get file size: {e}"); file_size_bytes = None
-        if file_size_bytes is not None: file_size_str = format_size(file_size_bytes)
-        return duration, creation_time_str_formatted, file_size_str, file_size_bytes
-    except subprocess.CalledProcessError as e: print(f"ffprobe error: {e}\n{e.stderr}"); return None, None, None, None
-    except json.JSONDecodeError as e: print(f"ffprobe JSON error: {e}\n{process.stdout if hasattr(process, 'stdout') else 'No stdout'}"); return None, None, None, None
-    except Exception as e: print(f"Metadata error: {e}"); return None, None, None, None
-
-def find_recent_videos(directory, count):
-    if not directory or not os.path.isdir(directory): print(f"Video search dir invalid: {directory}"); return []
-    all_videos = []
-    for ext_pattern in VIDEO_EXTENSIONS:
-        all_videos.extend(glob.glob(os.path.join(directory, ext_pattern)))
-    if not all_videos: print(f"No videos found in {directory}"); return []
-    try: all_videos.sort(key=os.path.getmtime, reverse=True); return all_videos[:count]
-    except Exception as e: print(f"Error sorting videos: {e}"); return []
-
-def extract_thumbnail(video_path, time_seconds, output_path):
-    global temp_files_to_cleanup
-    if not video_path or not os.path.exists(video_path): print(f"Thumb Error: Input not found - {video_path}"); return False
-    try:
-        startupinfo = None
-        if platform.system() == 'Windows': startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startupinfo.wShowWindow = subprocess.SW_HIDE
-        subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-    except (FileNotFoundError, subprocess.CalledProcessError): print("Error: ffmpeg not found."); tkinter.messagebox.showerror("Error", "ffmpeg not found in system PATH.\nPlease install FFmpeg and ensure it's added to PATH."); return False
-    valid_time_seconds = max(0, time_seconds) if isinstance(time_seconds, (int, float)) else 0
-    time_str = format_time(valid_time_seconds).split('.')[0]
-    command = ['ffmpeg', '-ss', time_str, '-i', video_path, '-frames:v', '1', '-q:v', '3',
-               '-vf', f'scale={THUMBNAIL_WIDTH}:-1:force_original_aspect_ratio=decrease,crop={THUMBNAIL_WIDTH}:{THUMBNAIL_HEIGHT}',
-               '-y', output_path]
-    try:
-        startupinfo = None
-        if platform.system() == 'Windows': startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startupinfo.wShowWindow = subprocess.SW_HIDE
-        process = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', startupinfo=startupinfo)
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            if output_path not in temp_files_to_cleanup:
-                temp_files_to_cleanup.append(output_path)
-            return True
-        else:
-            print(f"Error extracting thumbnail: Output file not created or empty. Command: {' '.join(command)}")
-            if os.path.exists(output_path): os.remove(output_path)
-            return False
-    except subprocess.CalledProcessError as e:
-        print(f"Error extracting thumbnail: {e}\nStderr: {e.stderr}\nCommand: {' '.join(command)}")
-        if os.path.exists(output_path):
-            try: os.remove(output_path)
-            except OSError: pass
-        return False
-    except Exception as e:
-        print(f"An unexpected error during thumbnail extraction: {e}\nCommand: {' '.join(command)}")
-        if os.path.exists(output_path):
-            try: os.remove(output_path)
-            except OSError: pass
-        return False
-
-def cleanup_temp_files():
-    global temp_files_to_cleanup
-    print("Cleaning up temporary files..."); cleaned_count = 0; errors = 0
-    for f in list(temp_files_to_cleanup):
-        try:
-            if f and os.path.exists(f): os.remove(f); cleaned_count +=1
-        except OSError as e: print(f"Error removing temp file {f}: {e}"); errors += 1
-        except Exception as e: print(f"Unexpected error removing temp file {f}: {e}"); errors += 1
-        finally:
-             if f in temp_files_to_cleanup: temp_files_to_cleanup.remove(f)
-    print(f"Cleanup finished. Removed {cleaned_count} files, {errors} errors."); temp_files_to_cleanup = []
-
-
-class CustomFilenameDialog(customtkinter.CTkToplevel):
-    def __init__(self, parent, title="Set Output Filename"):
-        super().__init__(parent)
-        self.transient(parent)
-        self.title(title)
-        self.lift()
-        self.grab_set()
-        self.result = None
-        _dialog_width = 350
-        self.label = customtkinter.CTkLabel(self, text="Enter filename (no extension, .mp4 will be added):")
-        self.label.pack(padx=20, pady=(20, 10))
-        self.entry_var = tkinter.StringVar()
-        self.entry_var.trace_add("write", self._validate_input)
-        self.entry = customtkinter.CTkEntry(self, textvariable=self.entry_var, width=int(_dialog_width * 0.8))
-        self.entry.pack(padx=20, pady=(0, 5))
-        self.entry.focus_set()
-        self.error_label = customtkinter.CTkLabel(self, text="", text_color="red", height=10)
-        self.error_label.pack(padx=20, pady=(0, 10))
-        self.button_frame = customtkinter.CTkFrame(self, fg_color="transparent")
-        self.button_frame.pack(padx=20, pady=(0, 20))
-        self.ok_button = customtkinter.CTkButton(self.button_frame, text="OK", command=self._on_ok)
-        self.ok_button.pack(side=tkinter.LEFT, padx=5)
-        self.cancel_button = customtkinter.CTkButton(self.button_frame, text="Cancel", command=self._on_cancel)
-        self.cancel_button.pack(side=tkinter.LEFT, padx=5)
-        self.bind("<Return>", lambda event: self._on_ok() if self.ok_button.cget("state") == "normal" else None)
-        self.bind("<Escape>", lambda event: self._on_cancel())
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self._validate_input()
-        self.update_idletasks()
-        parent_x = parent.winfo_x(); parent_y = parent.winfo_y()
-        parent_width = parent.winfo_width(); parent_height = parent.winfo_height()
-        dialog_width = self.winfo_reqwidth(); dialog_height = self.winfo_reqheight()
-        x = parent_x + (parent_width // 2) - (dialog_width // 2)
-        y = parent_y + (parent_height // 2) - (dialog_height // 2)
-        self.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-    def _validate_input(self, *args):
-        current_text = self.entry_var.get()
-        if not current_text:
-            self.ok_button.configure(state="normal")
-            self.error_label.configure(text="")
-            return
-        if any(char in FILENAME_INVALID_CHARS for char in current_text):
-            self.ok_button.configure(state="disabled")
-            self.error_label.configure(text=f"Invalid chars (e.g., {FILENAME_INVALID_CHARS[0]})")
-        else:
-            self.ok_button.configure(state="normal")
-            self.error_label.configure(text="")
-    def _on_ok(self):
-        if self.ok_button.cget("state") == "normal":
-            self.result = self.entry_var.get().strip()
-            self.grab_release(); self.destroy()
-    def _on_cancel(self):
-        self.result = None
-        self.grab_release(); self.destroy()
-    def get_input(self):
-        self.master.wait_window(self)
-        return self.result
 
 class VideoTrimmerApp(customtkinter.CTk):
     def __init__(self, initial_input_dir):
@@ -277,10 +34,10 @@ class VideoTrimmerApp(customtkinter.CTk):
         self.geometry("700x900")
         self.resizable(False, False)
 
-        self.placeholder_pil_image = Image.new('RGB', (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), color='gray')
+        self.placeholder_pil_image = Image.new('RGB', (config_settings.THUMBNAIL_WIDTH, config_settings.THUMBNAIL_HEIGHT), color='gray')
         self.placeholder_ctk_image = customtkinter.CTkImage(light_image=self.placeholder_pil_image,
                                                              dark_image=self.placeholder_pil_image,
-                                                             size=(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT))
+                                                             size=(config_settings.THUMBNAIL_WIDTH, config_settings.THUMBNAIL_HEIGHT))
         self.current_start_thumb_ctk = self.placeholder_ctk_image
         self.current_end_thumb_ctk = self.placeholder_ctk_image
 
@@ -335,7 +92,7 @@ class VideoTrimmerApp(customtkinter.CTk):
                 text_x = 10; text_y = height / 2
                 try: font_details = customtkinter.ThemeManager.theme["CTkFont"]; overlay_font = (font_details["family"], font_details["size"])
                 except: overlay_font = ("sans-serif", 12)
-                self.location_overlay_canvas.create_text(text_x, text_y, text=INITIAL_LOCATION_PROMPT, anchor="w", fill=combobox_text_color, font=overlay_font)
+                self.location_overlay_canvas.create_text(text_x, text_y, text=config_settings.INITIAL_LOCATION_PROMPT, anchor="w", fill=combobox_text_color, font=overlay_font)
             self.after(100, draw_overlay_elements)
         else:
             self.location_combobox.configure(state="readonly")
@@ -354,7 +111,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         self.file_info_display = customtkinter.CTkLabel(self.info_frame, text="Select a video", justify=tkinter.LEFT, anchor="nw")
         self.file_info_display.grid(row=0, column=0, padx=10, pady=5, sticky="ew")
 
-        self.start_time_label = customtkinter.CTkLabel(self, text=f"Start Time: {format_time(self.start_time)}")
+        self.start_time_label = customtkinter.CTkLabel(self, text=f"Start Time: {utils.format_time(self.start_time)}")
         self.start_time_label.grid(row=5, column=0, columnspan=4, padx=20, pady=(10, 0), sticky="w")
         self.start_scrub_left_button = customtkinter.CTkButton(self, text="<", width=40, command=self.scrub_start_left)
         self.start_scrub_left_button.grid(row=6, column=0, padx=(20, 5), pady=(5, 10), sticky="w")
@@ -362,7 +119,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         self.start_slider.grid(row=6, column=1, columnspan=2, padx=5, pady=(5, 10), sticky="ew")
         self.start_scrub_right_button = customtkinter.CTkButton(self, text=">", width=40, command=self.scrub_start_right)
         self.start_scrub_right_button.grid(row=6, column=3, padx=(5, 20), pady=(5, 10), sticky="e")
-        self.end_time_label = customtkinter.CTkLabel(self, text=f"End Time: {format_time(self.end_time)}")
+        self.end_time_label = customtkinter.CTkLabel(self, text=f"End Time: {utils.format_time(self.end_time)}")
         self.end_time_label.grid(row=7, column=0, columnspan=4, padx=20, pady=(10, 0), sticky="w")
         self.end_scrub_left_button = customtkinter.CTkButton(self, text="<", width=40, command=self.scrub_end_left)
         self.end_scrub_left_button.grid(row=8, column=0, padx=(20, 5), pady=(5, 20), sticky="w")
@@ -456,7 +213,7 @@ class VideoTrimmerApp(customtkinter.CTk):
             self._update_up_button_state()
 
     def add_recent_directory(self, new_path):
-        config_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), CONFIG_FILENAME)
+        config_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), config_settings.CONFIG_FILENAME)
         config = {}; 
         try:
             if os.path.exists(config_path):
@@ -464,7 +221,8 @@ class VideoTrimmerApp(customtkinter.CTk):
         except (json.JSONDecodeError, IOError) as e: print(f"Warning: Could not load config: {e}")
         recent = config.get("recent_input_directories", []); new_path_norm = os.path.normpath(new_path)
         recent = [os.path.normpath(p) for p in recent if os.path.isdir(p) and os.path.normpath(p) != new_path_norm]
-        recent.insert(0, new_path_norm); config["recent_input_directories"] = recent[:RECENT_FILES_COUNT]
+        recent.insert(0, new_path_norm); config["recent_input_directories"] = recent[:
+        config_settings.RECENT_FILES_COUNT]
         config["last_input_directory"] = new_path_norm
         try:
             with open(config_path, 'w') as f: json.dump(config, f, indent=4)
@@ -511,7 +269,7 @@ class VideoTrimmerApp(customtkinter.CTk):
             self.video_combobox.set("No videos found"); self.video_combobox.configure(state="disabled"); self.disable_ui_components(True)
             self.update_status("Cannot refresh: No directory selected.", "orange", is_temporary=True); return
         prev_selection = os.path.basename(self.video_path) if preserve_selection and self.video_path else None
-        self.recent_videos = find_recent_videos(self.current_input_directory, RECENT_FILES_COUNT)
+        self.recent_videos = find_recent_videos(self.current_input_directory, config_settings.RECENT_FILES_COUNT)
         self.video_filenames = [os.path.basename(p) for p in self.recent_videos]
         if self.video_filenames:
             self.video_combobox.configure(values=self.video_filenames, state="normal")
@@ -542,7 +300,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         if getattr(self, job_attr): self.after_cancel(getattr(self, job_attr))
         label = self.start_thumb_label if for_start_thumb else self.end_thumb_label
         if label and label.winfo_exists(): label.configure(image=self.placeholder_ctk_image)
-        new_job = self.after(THUMBNAIL_UPDATE_DELAY_MS, lambda t=time_seconds, fst=for_start_thumb: self.generate_and_display_thumbnail(t, fst))
+        new_job = self.after(config_settings.THUMBNAIL_UPDATE_DELAY_MS, lambda t=time_seconds, fst=for_start_thumb: self.generate_and_display_thumbnail(t, fst))
         setattr(self, job_attr, new_job)
 
     def generate_and_display_thumbnail(self, time_seconds, for_start_thumb):
@@ -551,7 +309,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         threading.Thread(target=self._run_thumbnail_extraction, args=(self.video_path, time_seconds, thumb_path, for_start_thumb), daemon=True).start()
 
     def _run_thumbnail_extraction(self, video_path, time_seconds, thumb_path, for_start_thumb):
-        success = extract_thumbnail(video_path, time_seconds, thumb_path)
+        success = utils.extract_thumbnail(video_path, time_seconds, thumb_path)
         self.after(0, self._update_thumbnail_label, thumb_path, for_start_thumb, success)
 
     def _update_thumbnail_label(self, thumb_path, for_start_thumb, success):
@@ -560,7 +318,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         new_img = self.placeholder_ctk_image
         if success and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
             try:
-                pil = Image.open(thumb_path); ctk_img = customtkinter.CTkImage(light_image=pil, dark_image=pil, size=(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)); new_img = ctk_img
+                pil = Image.open(thumb_path); ctk_img = customtkinter.CTkImage(light_image=pil, dark_image=pil, size=(config_settings.THUMBNAIL_WIDTH, config_settings.THUMBNAIL_HEIGHT)); new_img = ctk_img
             except Exception as e: print(f"Error loading thumbnail: {e}")
             if os.path.exists(thumb_path) and thumb_path in temp_files_to_cleanup:
                 try: temp_files_to_cleanup.remove(thumb_path); os.remove(thumb_path)
@@ -580,8 +338,8 @@ class VideoTrimmerApp(customtkinter.CTk):
 
     def on_location_selected(self, selected_path):
         if self.location_overlay_canvas: return
-        if selected_path == INITIAL_LOCATION_PROMPT: return
-        if selected_path == BROWSE_OPTION:
+        if selected_path == config_settings.INITIAL_LOCATION_PROMPT: return
+        if selected_path == config_settings.BROWSE_OPTION:
             new_dir = tkinter.filedialog.askdirectory(initialdir=self.current_input_directory or os.getcwd(), title="Select Video Directory")
             if new_dir and os.path.isdir(new_dir): self.current_input_directory = os.path.normpath(new_dir)
             else:
@@ -597,31 +355,31 @@ class VideoTrimmerApp(customtkinter.CTk):
         else: self.update_status(f"Directory: {os.path.basename(self.current_input_directory)}", "green", True)
 
     def populate_location_dropdown(self):
-        recent_dirs = []; config_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), CONFIG_FILENAME)
+        recent_dirs = []; config_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), config_settings.CONFIG_FILENAME)
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f: config = json.load(f)
                 loaded_recents = config.get("recent_input_directories", [])
                 recent_dirs = [os.path.normpath(p) for p in loaded_recents if os.path.isdir(p)]
             except Exception as e: print(f"Error loading recents: {e}")
-        dropdown_items = [BROWSE_OPTION]; current_norm = os.path.normpath(self.current_input_directory) if self.current_input_directory and os.path.isdir(self.current_input_directory) else None
+        dropdown_items = [config_settings.BROWSE_OPTION]; current_norm = os.path.normpath(self.current_input_directory) if self.current_input_directory and os.path.isdir(self.current_input_directory) else None
         for r_dir in recent_dirs:
             if r_dir != current_norm and r_dir not in dropdown_items: dropdown_items.append(r_dir)
         self.location_options = dropdown_items; self.location_combobox.configure(values=self.location_options)
-        display_text = BROWSE_OPTION
+        display_text = config_settings.BROWSE_OPTION
         if current_norm: display_text = current_norm
-        elif self.location_overlay_canvas is not None: display_text = INITIAL_LOCATION_PROMPT
+        elif self.location_overlay_canvas is not None: display_text = config_settings.INITIAL_LOCATION_PROMPT
         self.location_combobox.set(display_text)
 
     def update_destination_dropdown(self):
         if not self.output_directory or not os.path.isdir(self.output_directory):
             self.output_directory = self.current_input_directory if self.current_input_directory and os.path.isdir(self.current_input_directory) else os.getcwd()
-        parents = get_parent_directories(self.output_directory); dest_set = {BROWSE_OPTION}
+        parents = utils.get_parent_directories(self.output_directory); dest_set = {config_settings.BROWSE_OPTION}
         if self.output_directory: dest_set.add(self.output_directory)
         if self.current_input_directory: dest_set.add(self.current_input_directory)
         for p in parents: dest_set.add(p)
-        ordered_opts = [BROWSE_OPTION]
-        if self.output_directory and self.output_directory != BROWSE_OPTION: ordered_opts.append(self.output_directory)
+        ordered_opts = [config_settings.BROWSE_OPTION]
+        if self.output_directory and self.output_directory != config_settings.BROWSE_OPTION: ordered_opts.append(self.output_directory)
         if self.current_input_directory and self.current_input_directory not in ordered_opts: ordered_opts.append(self.current_input_directory)
         for p in parents:
             if p not in ordered_opts: ordered_opts.append(p)
@@ -633,7 +391,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         else: self.destination_combobox.set("")
 
     def on_destination_selected(self, selected_path):
-        if selected_path == BROWSE_OPTION:
+        if selected_path == config_settings.BROWSE_OPTION:
             new_dir = tkinter.filedialog.askdirectory(initialdir=self.output_directory or os.getcwd(), title="Select Output Directory")
             if new_dir and os.path.isdir(new_dir): self.output_directory = os.path.normpath(new_dir)
         else: self.output_directory = os.path.normpath(selected_path)
@@ -641,7 +399,7 @@ class VideoTrimmerApp(customtkinter.CTk):
 
     def on_video_selected(self, selected_filename):
         if self.is_processing: return
-        if not selected_filename or selected_filename in ["No videos found", "Initializing...", INITIAL_LOCATION_PROMPT]:
+        if not selected_filename or selected_filename in ["No videos found", "Initializing...", config_settings.INITIAL_LOCATION_PROMPT]:
             self.video_path = None; self.disable_ui_components(True); self.update_info_display(); self.display_placeholder_thumbnails(); return
         if not self.current_input_directory:
             self.update_status("Error: Input directory not set.", "red", True); self.video_path = None; self.refresh_video_list(); return
@@ -653,13 +411,13 @@ class VideoTrimmerApp(customtkinter.CTk):
     def load_video_data(self):
         if not self.video_path: self.disable_ui_components(True); self.update_info_display(); self.display_placeholder_thumbnails(); return
         self.update_status(f"Loading {os.path.basename(self.video_path)}...", "blue", True)
-        duration_s, ctime, size_s, size_b = get_video_metadata(self.video_path)
+        duration_s, ctime, size_s, size_b = utils.get_video_metadata(self.video_path)
         if duration_s is None:
             self.update_status(f"Error loading metadata for {os.path.basename(self.video_path)}.", "red", True); self.video_path = None; self.refresh_video_list(False)
             if not self.video_path: self.disable_ui_components(True); self.update_info_display(); self.display_placeholder_thumbnails()
             return
         self.duration = duration_s; self.original_size_bytes = size_b; self.current_filename = os.path.basename(self.video_path)
-        self.current_creation_time = ctime; self.current_size_str = size_s; self.current_duration_str = format_time(self.duration)
+        self.current_creation_time = ctime; self.current_size_str = size_s; self.current_duration_str = utils.format_time(self.duration)
         self.start_time = 0.0; self.end_time = self.duration if self.duration > 0 else 1.0
         slider_max = self.duration if self.duration > 0 else 1.0
         self.start_slider.configure(to=slider_max); self.end_slider.configure(to=slider_max)
@@ -679,7 +437,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         except ValueError: return
         if self.is_processing: return
         if val >= self.end_time - 0.01: val = max(0, self.end_time - 0.05)
-        self.start_time = max(0, val); self.start_time_label.configure(text=f"Start Time: {format_time(self.start_time)}")
+        self.start_time = max(0, val); self.start_time_label.configure(text=f"Start Time: {utils.format_time(self.start_time)}")
         self.schedule_thumbnail_update(self.start_time, True)
 
     def update_end_time(self, val_str_float):
@@ -687,32 +445,32 @@ class VideoTrimmerApp(customtkinter.CTk):
         except ValueError: return
         if self.is_processing: return
         if val <= self.start_time + 0.01: val = min(self.duration, self.start_time + 0.05)
-        self.end_time = min(self.duration, val); self.end_time_label.configure(text=f"End Time: {format_time(self.end_time)}")
+        self.end_time = min(self.duration, val); self.end_time_label.configure(text=f"End Time: {utils.format_time(self.end_time)}")
         self.schedule_thumbnail_update(self.end_time, False)
 
     def scrub_start_left(self):
         if not self.video_path or self.is_processing: return
-        new_time = max(0, self.start_time - SCRUB_INCREMENT)
+        new_time = max(0, self.start_time - config_settings.SCRUB_INCREMENT)
         self.start_slider.set(new_time)
         self.update_start_time(new_time) 
 
     def scrub_start_right(self):
         if not self.video_path or self.is_processing: return
-        new_time = min(self.end_time - 0.05, self.start_time + SCRUB_INCREMENT)
+        new_time = min(self.end_time - 0.05, self.start_time + config_settings.SCRUB_INCREMENT)
         new_time = max(0, new_time) 
         self.start_slider.set(new_time)
         self.update_start_time(new_time)
 
     def scrub_end_left(self):
         if not self.video_path or self.is_processing: return
-        new_time = max(self.start_time + 0.05, self.end_time - SCRUB_INCREMENT)
+        new_time = max(self.start_time + 0.05, self.end_time - config_settings.SCRUB_INCREMENT)
         new_time = min(self.duration, new_time)
         self.end_slider.set(new_time)
         self.update_end_time(new_time)
 
     def scrub_end_right(self):
         if not self.video_path or self.is_processing:return
-        new_time = min(self.duration, self.end_time + SCRUB_INCREMENT)
+        new_time = min(self.duration, self.end_time + config_settings.SCRUB_INCREMENT)
         self.end_slider.set(new_time)
         self.update_end_time(new_time)
 
@@ -721,12 +479,12 @@ class VideoTrimmerApp(customtkinter.CTk):
         if self.is_processing: return
         if not self.video_path: self.update_status("No video selected.", "red", True); return
         if not self.output_directory or not os.path.isdir(self.output_directory):
-            self.update_status("Invalid output directory.", "red", True); self.on_destination_selected(BROWSE_OPTION)
+            self.update_status("Invalid output directory.", "red", True); self.on_destination_selected(config_settings.BROWSE_OPTION)
             if not self.output_directory or not os.path.isdir(self.output_directory): self.update_status("Output dir still not set.", "red", True); return
             self.update_status("Output dir selected. Try again.", "orange", True); return
         if abs(self.end_time - self.start_time) < 0.1: self.update_status("Trim duration too short.", "red", True); return
         if self.rename_checkbox.get() == 1:
-            dialog = CustomFilenameDialog(self, title="Set Output Filename"); custom_base = dialog.get_input()
+            dialog = ui_dialogs.CustomFilenameDialog(self, title="Set Output Filename"); custom_base = dialog.get_input()
             if custom_base is None: self.rename_checkbox.deselect(); self.update_status("Rename cancelled.", "orange", True)
             elif not custom_base.strip(): self.rename_checkbox.deselect(); self.update_status("Empty name. Defaulting.", "orange", True)
             else: self.pending_custom_filename = custom_base.strip() + ".mp4"
@@ -754,13 +512,13 @@ class VideoTrimmerApp(customtkinter.CTk):
                 final_out_actual = os.path.join(self.output_directory, custom_final_name_mp4 if custom_final_name_mp4 else os.path.basename(original_in))
             else:
                 target_ext = ".mp4" if custom_final_name_mp4 else in_ext
-                file_base = os.path.splitext(custom_final_name_mp4)[0] if custom_final_name_mp4 else f"{in_base}{TRIM_SUFFIX}"
+                file_base = os.path.splitext(custom_final_name_mp4)[0] if custom_final_name_mp4 else f"{in_base}{config_settings.TRIM_SUFFIX}"
                 out_name = f"{file_base}{target_ext}" if custom_final_name_mp4 else f"{file_base}{target_ext}"
                 final_out_actual = os.path.join(self.output_directory, out_name); counter = 1
                 while os.path.exists(final_out_actual): final_out_actual = os.path.join(self.output_directory, f"{file_base}_{counter}{target_ext}"); counter += 1
                 ffmpeg_target = final_out_actual
             if final_out_actual is None: final_out_actual = ffmpeg_target
-            start_s = format_time(self.start_time); trim_dur = max(0.1, self.end_time - self.start_time)
+            start_s = utils.format_time(self.start_time); trim_dur = max(0.1, self.end_time - self.start_time)
             cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-ss', start_s, '-i', original_in, '-t', str(trim_dur), '-c', 'copy', '-map', '0', '-avoid_negative_ts', 'make_zero', '-y', ffmpeg_target]
             self.after(0, lambda: self.update_status("Processing...", "blue", False)); print(f"FFmpeg: {' '.join(cmd)}")
             si = None; 
@@ -819,7 +577,7 @@ class VideoTrimmerApp(customtkinter.CTk):
         def _upd():
             if hasattr(self, 'status_label') and self.status_label.winfo_exists(): self.status_label.configure(text=message, text_color=color)
         if is_persistent_trim_status: self.last_trim_status_message = message; self.last_trim_status_color = color; self.temporary_status_active = False; self.after(0, _upd)
-        elif is_temporary: self.temporary_status_active = True; self.after(0, _upd); self.status_message_clear_job = self.after(STATUS_MESSAGE_CLEAR_DELAY_MS, self._revert_to_persistent_status)
+        elif is_temporary: self.temporary_status_active = True; self.after(0, _upd); self.status_message_clear_job = self.after(config_settings.STATUS_MESSAGE_CLEAR_DELAY_MS, self._revert_to_persistent_status)
         else:
             if not self.last_trim_status_message or color=="red": self.last_trim_status_message = ""
             self.temporary_status_active = False; self.after(0, _upd)
@@ -848,41 +606,6 @@ class VideoTrimmerApp(customtkinter.CTk):
         if self.end_thumb_job: self.after_cancel(self.end_thumb_job)
         if self.status_message_clear_job: self.after_cancel(self.status_message_clear_job)
         if self.is_processing: print("Warning: Closing during processing.")
-        cleanup_temp_files(); 
+        utils.cleanup_temp_files(); 
         if self.winfo_exists(): self.destroy()
         sys.exit(0)
-
-
-if __name__ == "__main__":
-    try:
-        si_check = None
-        if platform.system() == 'Windows': si_check = subprocess.STARTUPINFO(); si_check.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si_check.wShowWindow = subprocess.SW_HIDE
-        subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si_check)
-        subprocess.run(['ffprobe', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si_check)
-        print("FFmpeg and ffprobe found.")
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        err_msg = f"ERROR: FFmpeg/ffprobe not found/executable.\nEnsure installed and in PATH.\nDetails: {e}"
-        print(err_msg); r_err = tkinter.Tk(); r_err.withdraw(); tkinter.messagebox.showerror("Startup Error", err_msg, parent=r_err); r_err.destroy(); sys.exit(1)
-    except Exception as e:
-        err_msg = f"Unexpected error checking FFmpeg/ffprobe: {e}"
-        print(err_msg); r_err = tkinter.Tk(); r_err.withdraw(); tkinter.messagebox.showerror("Startup Error", err_msg, parent=r_err); r_err.destroy(); sys.exit(1)
-
-    customtkinter.set_appearance_mode("System"); customtkinter.set_default_color_theme("blue")
-    customtkinter.set_widget_scaling(1.0); customtkinter.set_window_scaling(1.0)
-
-    init_dir_app = load_last_directory()
-    app = None
-    try:
-        app = VideoTrimmerApp(initial_input_dir=init_dir_app)
-        if app and app.winfo_exists(): app.mainloop()
-        else: print("App window failed/closed prematurely."); cleanup_temp_files(); sys.exit(1)
-    except Exception as e:
-        print(f"Unhandled exception in app init/mainloop: {e}"); import traceback; traceback.print_exc()
-        err_to_show = f"App critical error:\n\n{type(e).__name__}: {e}"
-        if app and hasattr(app, 'show_error_and_quit') and app.winfo_exists(): app.show_error_and_quit(err_to_show)
-        else:
-            rc_err = tkinter.Tk(); rc_err.withdraw(); tkinter.messagebox.showerror("Application Critical Error", err_to_show, parent=rc_err)
-            if rc_err.winfo_exists(): rc_err.destroy()
-        cleanup_temp_files(); sys.exit(1)
-    finally:
-        print("Application exited.")
