@@ -1,5 +1,3 @@
-#hi tayyyyy
-
 import tkinter
 import tkinter.filedialog
 import tkinter.messagebox
