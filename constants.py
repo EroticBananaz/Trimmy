@@ -1,0 +1,13 @@
+VIDEO_EXTENSIONS = ('*.mp4', '*.mov', '*.avi', '*.mkv', '*.wmv', '*.flv')
+RECENT_FILES_COUNT = 5
+THUMBNAIL_WIDTH = 320
+THUMBNAIL_HEIGHT = 180
+THUMBNAIL_UPDATE_DELAY_MS = 300
+TRIM_SUFFIX = "_trimmy"
+SCRUB_INCREMENT = 0.5
+temp_files_to_cleanup = []
+BROWSE_OPTION = "Browse..."
+STATUS_MESSAGE_CLEAR_DELAY_MS = 5000
+CONFIG_FILENAME = "config.json"
+INITIAL_LOCATION_PROMPT = "Click to Select Video Directory..."
+FILENAME_INVALID_CHARS = r'/\:*?"<>|'
